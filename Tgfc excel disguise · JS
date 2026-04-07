@@ -1,0 +1,874 @@
+// ==UserScript==
+// @name         TGFC摸鱼助手(Excel伪装)
+// @namespace    http://tampermonkey.net/
+// @version      3.0
+// @description  把 TGFC WAP论坛伪装成 Excel 表格。支持帖子列表页和帖子详情页。
+// @author       Based on S1摸鱼助手 by Gemini, adapted for TGFC
+// @match        *://s.tgfcer.com/wap/*
+// @match        *://wap.tgfcer.com/*
+// @grant        GM_addStyle
+// @run-at       document-end
+// @license      MIT
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // ==========================================
+    // 【修复1】先清理上一次脚本注入残留的 excel-fake-header 等元素
+    // 防止 MHTML 快照/页面缓存里已存在旧的注入 HTML，导致 getElementById 拿到旧壳子
+    // ==========================================
+    document.querySelectorAll(
+        '#excel-fake-header, #excel-sheet-bar-container, #excel-footer-bar, #excel-toggle-btn'
+    ).forEach(el => el.remove());
+
+    // ==========================================
+    // 【修复2】isThreadPage 判断改用 URL params 解析，兼容各种格式
+    // ==========================================
+    const urlParams = new URLSearchParams(location.search);
+    const isThreadPage = urlParams.get('action') === 'thread';
+
+    let isWorkMode = localStorage.getItem('tgfc_excel_mode') === 'true';
+
+    // ==========================================
+    // 1. 注入 Excel 顶部 UI HTML
+    // ==========================================
+    const colHeadersHTML = isThreadPage ? `
+        <div class="row-idx-blank"></div>
+        <div style="white-space:nowrap;flex-shrink:0;border-right:1px solid #d4d4d4;padding:0 10px;min-width:80px;">A（楼层/作者）</div>
+        <div style="flex:1;border-right:1px solid #d4d4d4;padding:0 4px;text-align:left;">B（内容）</div>
+        <div style="white-space:nowrap;flex-shrink:0;padding:0 8px;min-width:70px;">C（时间）</div>
+    ` : `
+        <div class="row-idx-blank"></div>
+        <div class="col-a">A（作者/回复/浏览/末回）</div>
+        <div class="col-b">B（主题）</div>
+        <div class="col-c">C（分页）</div>
+    `;
+
+    const headerDiv = document.createElement('div');
+    headerDiv.innerHTML = `
+        <div id="excel-fake-header">
+            <div class="excel-title-bar">
+                <span class="excel-icon">X</span>
+                <span class="excel-filename">Business_Report_2025.xlsx - Excel</span>
+            </div>
+            <div class="excel-menu-bar">
+                <span>文件</span><span class="active">开始</span><span>插入</span>
+                <span>页面布局</span><span>公式</span><span>数据</span>
+                <span>审阅</span><span>视图</span>
+            </div>
+            <div class="excel-ribbon">
+                <div class="ribbon-group"><div class="ribbon-btn">📋 粘贴</div></div>
+                <div class="ribbon-divider"></div>
+                <div class="ribbon-group font-settings">
+                    <select><option>DengXian</option><option>Calibri</option></select>
+                    <select><option>11</option></select>
+                    <div class="font-actions"><b>B</b> <i>I</i> <u>U</u></div>
+                </div>
+                <div class="ribbon-divider"></div>
+                <div class="ribbon-group" style="color:#999;font-size:12px;margin-left:10px;">
+                    <span style="margin-right:10px">自动换行</span>
+                    <span>合并后居中</span>
+                </div>
+            </div>
+            <div class="excel-formula-bar">
+                <span class="name-box">A1</span>
+                <span class="fx">fx</span>
+                <div id="formula-bar-content"></div>
+            </div>
+            <div class="excel-col-headers">${colHeadersHTML}</div>
+        </div>
+        <div id="excel-sheet-bar-container">
+            <div class="sheet-nav-arrows"><span>◀</span><span>▶</span></div>
+            <div id="excel-sheets-scroll"></div>
+            <div class="sheet-add-btn">+</div>
+        </div>
+        <div id="excel-footer-bar">
+            <span>就绪</span>
+            <span style="float:right;margin-right:20px;">-------+ -- 100%</span>
+        </div>
+    `;
+    document.body.prepend(headerDiv);
+
+    // ==========================================
+    // 2. CSS
+    // ==========================================
+    GM_addStyle(`
+        #excel-toggle-btn {
+            position:fixed; top:5px; right:5px; padding:5px 10px;
+            background:#217346; color:white; z-index:999999;
+            cursor:pointer; font-size:12px; font-weight:bold; border-radius:4px;
+            box-shadow:0 2px 5px rgba(0,0,0,0.2); font-family:sans-serif; user-select:none;
+        }
+        #excel-toggle-btn:hover { background:#104e2b; }
+
+        body.excel-mode {
+            background:#fff !important;
+            font-family:'DengXian','Calibri',sans-serif !important;
+            font-size:11pt !important; color:#000 !important; margin:0 !important;
+            padding-top:158px !important; padding-bottom:55px !important;
+            overflow-x:hidden !important;
+        }
+
+        /* 隐藏 WAP 原生元素 */
+        body.excel-mode .navbar,
+        body.excel-mode #footer,
+        body.excel-mode #gotofourmform,
+        body.excel-mode ins.adsbygoogle
+        { display:none !important; }
+
+        /* 列表页隐藏顶部 <p>（面包屑+操作）；详情页单独处理 */
+        body.excel-mode.forum-page #scroller > p
+        { display:none !important; }
+
+        /* 详情页：原始 <p> 中操作链接全部隐藏，只保留面包屑 */
+        body.excel-mode.thread-page #scroller > p .op-links
+        { display:none !important; }
+
+        /* 面包屑导航条（详情页表格上方） */
+        #tgfc-breadcrumb {
+            padding:4px 8px 4px 8px;
+            font-size:11pt;
+            color:#333;
+            border-bottom:1px solid #e1e1e1;
+            background:#fff;
+            line-height:22px;
+        }
+        #tgfc-breadcrumb a {
+            color:#333 !important;
+            text-decoration:none !important;
+            cursor:pointer;
+        }
+        #tgfc-breadcrumb a:hover {
+            color:#217346 !important;
+            text-decoration:none !important;
+        }
+        #tgfc-breadcrumb .bc-sep {
+            color:#999;
+            margin:0 4px;
+        }
+
+        /* ── 列表页 ── */
+        body.excel-mode #tgfc-excel-table-wrap {
+            width:100%; display:table; border-collapse:collapse; table-layout:fixed;
+        }
+        body.excel-mode .excel-row { display:table-row; }
+        body.excel-mode .excel-row:hover .excel-cell {
+            background:#e6f2ea !important; outline:1px solid #217346;
+        }
+        body.excel-mode .excel-cell {
+            display:table-cell; padding:2px 6px; height:24px; line-height:24px;
+            font-size:11pt; border:1px solid #e1e1e1; background:#fff; color:#000;
+            white-space:nowrap; overflow:hidden; text-overflow:ellipsis; vertical-align:middle;
+        }
+        body.excel-mode .excel-cell.row-idx {
+            width:35px; background:#f3f2f1; text-align:center;
+            color:#666; font-size:10pt; border-right:1px solid #d4d4d4;
+        }
+        body.excel-mode .excel-cell.col-author { width:200px; color:#555; font-size:10pt; }
+        body.excel-mode .excel-cell.col-paging { width:110px; color:#888; font-size:10pt; }
+        body.excel-mode .excel-cell a { color:#000 !important; text-decoration:none !important; }
+        body.excel-mode .excel-cell a.s2 { color:#1a6fc4 !important; margin-right:3px; }
+        body.excel-mode .excel-row.sticky .excel-cell {
+            background:#f0fff4 !important; color:#217346; font-weight:bold;
+        }
+        body.excel-mode .excel-row.sticky .excel-cell a { color:#217346 !important; }
+
+        /* ── 详情页 ── */
+        body.excel-mode #tgfc-thread-table {
+            width:100%; border-collapse:collapse; table-layout:auto;
+        }
+        body.excel-mode .thread-title-row td {
+            padding:6px 10px; border:1px solid #c8e6c9;
+            background:#e8f5e9 !important; font-size:10.5pt; color:#1b5e20; line-height:1.6;
+        }
+        body.excel-mode .post-row td {
+            border:1px solid #e1e1e1; vertical-align:top; padding:5px 7px; background:#fff;
+        }
+        body.excel-mode .post-row:nth-child(even) td { background:#fafffe; }
+        body.excel-mode .post-row:hover td { background:#f0faf3 !important; }
+        body.excel-mode .td-author {
+            width:1px; white-space:nowrap; text-align:center; font-size:10pt; color:#333;
+            background:#fafafa !important; border-right:2px solid #d4d4d4 !important; line-height:1.8;
+            padding:5px 10px !important;
+        }
+        body.excel-mode .floor-num {
+            font-size:13pt; font-weight:bold; color:#217346; display:block;
+        }
+        body.excel-mode .author-name {
+            color:#1a6fc4; font-size:10pt; display:block;
+            word-break:break-all; text-decoration:none !important;
+        }
+        body.excel-mode .post-badge { font-size:9pt; color:#999; display:block; }
+        body.excel-mode .td-content {
+            line-height:1.6; font-size:11pt; color:#111;
+            word-break:break-word; white-space:pre-wrap;
+        }
+        body.excel-mode .td-content img { max-width:100%; height:auto; display:block; margin:4px 0; }
+        body.excel-mode .td-content a { color:#1a6fc4 !important; }
+        body.excel-mode .td-meta {
+            width:1px; white-space:nowrap; font-size:9pt; color:#888; text-align:right;
+            vertical-align:top; padding:5px 8px !important;
+            border-left:1px solid #ebebeb !important;
+        }
+        body.excel-mode .td-meta .post-time { display:block; color:#aaa; font-size:9pt; }
+        body.excel-mode .td-meta a {
+            color:#888 !important; text-decoration:none; font-size:9.5pt;
+            display:inline-block; margin:2px 0;
+        }
+        body.excel-mode .td-meta a:hover { color:#217346 !important; }
+        body.excel-mode #tgfc-reply-row td {
+            border:1px solid #e1e1e1; padding:8px 10px; background:#f8fffe;
+        }
+        body.excel-mode #tgfc-reply-row textarea {
+            width:65%; height:54px; border:1px solid #ccc; padding:4px;
+            font-size:11pt; font-family:'DengXian',sans-serif; resize:vertical;
+        }
+        body.excel-mode #tgfc-reply-row .reply-submit {
+            background:#217346; color:white; border:none; padding:4px 14px;
+            border-radius:3px; cursor:pointer; font-size:11pt; margin-left:8px;
+        }
+
+        /* ── 公共 Excel UI ── */
+        #excel-fake-header { display:none; }
+        body.excel-mode #excel-fake-header {
+            display:block; position:fixed; top:0; left:0; width:100%;
+            z-index:9999; background:#f3f2f1; border-bottom:1px solid #ccc; box-sizing:border-box;
+        }
+        .excel-title-bar { background:#217346; color:white; padding:4px 10px; font-size:12px; display:flex; align-items:center; }
+        .excel-icon { background:white; color:#217346; padding:0 4px; margin-right:10px; font-weight:bold; border-radius:2px; font-size:10px; }
+        .excel-menu-bar { background:#217346; color:#eee; display:flex; font-size:13px; padding-top:3px; }
+        .excel-menu-bar span { padding:4px 12px; cursor:pointer; }
+        .excel-menu-bar span.active { background:#f3f2f1; color:#217346; border-radius:4px 4px 0 0; }
+        .excel-ribbon { height:44px; background:#f3f2f1; display:flex; align-items:center; padding:0 10px; border-bottom:1px solid #d4d4d4; }
+        .ribbon-divider { height:28px; width:1px; background:#ccc; margin:0 10px; }
+        .font-settings select { height:20px; font-size:11px; border:1px solid #ccc; }
+        .font-actions { margin-top:2px; font-size:12px; }
+        .font-actions * { margin-right:5px; cursor:pointer; padding:0 2px; }
+        .excel-formula-bar { display:flex; align-items:center; padding:3px 6px; background:white; border-bottom:1px solid #d4d4d4; }
+        .name-box { width:42px; border-right:1px solid #ccc; text-align:center; font-size:11px; color:#333; margin-right:8px; padding-right:4px; }
+        .fx { color:#bbb; font-weight:bold; margin-right:8px; font-style:italic; }
+        #formula-bar-content { flex:1; height:20px; line-height:20px; outline:none; font-family:'DengXian'; font-size:11pt; color:#333; overflow:hidden; white-space:nowrap; }
+        #formula-bar-content a { color:#333; text-decoration:none; margin:0 2px; }
+        #formula-bar-content a:hover { text-decoration:underline; color:#217346; }
+        #formula-bar-content em { color:#999; font-style:normal; margin:0 2px; }
+        .excel-col-headers { display:flex; background:#f3f2f1; border-bottom:1px solid #d4d4d4; font-size:11px; color:#666; text-align:center; height:20px; line-height:20px; }
+        .excel-col-headers div { border-right:1px solid #d4d4d4; }
+        .row-idx-blank { width:35px; background:#e6e6e6; flex-shrink:0; }
+        .excel-col-headers .col-a { width:155px; flex-shrink:0; padding:0 4px; }
+        .excel-col-headers .col-b { flex:1; text-align:left; padding:0 4px; }
+        .excel-col-headers .col-c { width:110px; flex-shrink:0; padding:0 4px; }
+
+        #excel-sheet-bar-container { display:none; }
+        body.excel-mode #excel-sheet-bar-container {
+            display:flex; position:fixed; bottom:22px; left:0; width:100%;
+            height:30px; background:#f3f2f1; border-top:1px solid #d4d4d4;
+            z-index:10000; align-items:center; padding-left:5px; box-sizing:border-box;
+        }
+        .sheet-nav-arrows span { color:#999; padding:0 5px; cursor:pointer; font-size:12px; }
+        #excel-sheets-scroll { display:flex; overflow-x:auto; margin-left:10px; scrollbar-width:none; }
+        #excel-sheets-scroll::-webkit-scrollbar { display:none; }
+        .sheet-tab { padding:4px 14px; margin-right:1px; font-size:12px; cursor:pointer; white-space:nowrap; color:#000; text-decoration:none !important; border-right:1px solid #d4d4d4; }
+        .sheet-tab:hover { background:#e1e1e1; }
+        .sheet-tab.active { background:#fff; color:#217346; font-weight:bold; border-bottom:2px solid #fff; position:relative; top:1px; }
+        .sheet-add-btn { margin-left:10px; color:#666; cursor:pointer; font-size:16px; }
+
+        #excel-footer-bar { display:none; }
+        body.excel-mode #excel-footer-bar {
+            display:block; position:fixed; bottom:0; left:0; width:100%;
+            height:22px; background:#f3f2f1; border-top:1px solid #d4d4d4;
+            color:#666; font-size:11px; line-height:22px; padding-left:10px;
+            z-index:10000; box-sizing:border-box;
+        }
+    `);
+
+    // ==========================================
+    // 3. 切换按钮
+    // ==========================================
+    const btn = document.createElement('div');
+    btn.id = 'excel-toggle-btn';
+    btn.textContent = isWorkMode ? '退出摸鱼' : '摸鱼模式';
+    btn.title = 'Ctrl+Shift+X 切换模式';
+    btn.addEventListener('click', toggleMode);
+    document.body.appendChild(btn);
+
+    document.addEventListener('keydown', e => {
+        if (e.ctrlKey && e.shiftKey && e.key.toUpperCase() === 'X') {
+            e.preventDefault(); toggleMode();
+        }
+    });
+
+    if (isWorkMode) enableExcel();
+
+    function toggleMode() {
+        isWorkMode = !isWorkMode;
+        localStorage.setItem('tgfc_excel_mode', isWorkMode);
+        btn.textContent = isWorkMode ? '退出摸鱼' : '摸鱼模式';
+        if (isWorkMode) enableExcel(); else disableExcel();
+    }
+
+    function enableExcel() {
+        document.body.classList.add('excel-mode');
+        // 给 body 加页面类型标记，供 CSS 区分列表页/详情页
+        document.body.classList.add(isThreadPage ? 'thread-page' : 'forum-page');
+        document.title = 'Business_Report_2025.xlsx - Excel';
+        if (isThreadPage) buildThreadTable(); else buildForumTable();
+        initBreadcrumb();
+        initSheetPagination();
+        initFormulaBarHover();
+    }
+
+    function disableExcel() {
+        document.body.classList.remove('excel-mode', 'thread-page', 'forum-page');
+        document.title = 'TGFC俱乐部';
+        if (isThreadPage) {
+            const t = document.getElementById('tgfc-thread-table');
+            if (t) t.style.display = 'none';
+            const bc = document.getElementById('tgfc-breadcrumb');
+            if (bc) bc.style.display = 'none';
+            // 恢复原始 <p>
+            const scr1 = document.getElementById('scroller') || document.body;
+            const p1 = scr1.querySelector('p');
+            if (p1) p1.style.display = '';
+            document.querySelectorAll('#scroller .infobar, #scroller .message').forEach(el => el.style.display = '');
+            const pf = document.getElementById('postform');
+            if (pf) {
+                // 恢复 postForm 定位（摸鱼模式下移到屏幕外而非 display:none）
+                pf.style.position = '';
+                pf.style.top = '';
+                pf.style.left = '';
+                pf.style.opacity = '';
+                pf.style.pointerEvents = '';
+            }
+        } else {
+            const w = document.getElementById('tgfc-excel-table-wrap');
+            if (w) w.style.display = 'none';
+            document.querySelectorAll('.dTitle').forEach(el => el.style.display = '');
+        }
+    }
+
+    // ==========================================
+    // 4A. 列表页
+    // ==========================================
+    function buildForumTable() {
+        const existing = document.getElementById('tgfc-excel-table-wrap');
+        if (existing) {
+            existing.style.display = 'table';
+            document.querySelectorAll('.dTitle').forEach(el => el.style.display = 'none');
+            return;
+        }
+        const allTitles = document.querySelectorAll('.dTitle');
+        if (!allTitles.length) return;
+
+        const tableWrap = document.createElement('div');
+        tableWrap.id = 'tgfc-excel-table-wrap';
+
+        let rowIdx = 1;
+        allTitles.forEach(div => {
+            const titleEl  = div.querySelector('.title');
+            const authorEl = div.querySelector('.author');
+            const pagingEl = div.querySelector('.paging');
+            if (!titleEl) return;
+            div.style.display = 'none';
+
+            const row = document.createElement('div');
+            row.className = 'excel-row';
+            if ((titleEl.innerText || '').includes('[顶]')) row.classList.add('sticky');
+
+            const idxCell = document.createElement('div');
+            idxCell.className = 'excel-cell row-idx';
+            idxCell.textContent = rowIdx++;
+            row.appendChild(idxCell);
+
+            const authorCell = document.createElement('div');
+            authorCell.className = 'excel-cell col-author';
+            if (authorEl) {
+                const parts = authorEl.innerText.replace(/^\[|\]$/g, '').split('/');
+                const lastId = parts[3] ? parts[3].trim() : '';
+                authorCell.textContent = `${parts[0]||''}  ${parts[1]||'0'}回/${parts[2]||'0'}览` + (lastId ? `  [${lastId}]` : '');
+                authorCell.title = authorEl.innerText;
+            }
+            row.appendChild(authorCell);
+
+            const titleCell = document.createElement('div');
+            titleCell.className = 'excel-cell col-title';
+            const tlink = titleEl.querySelector('a');
+            if (tlink) { const a = tlink.cloneNode(true); a.target = '_self'; titleCell.appendChild(a); }
+            else titleCell.textContent = titleEl.innerText;
+            titleCell.title = titleEl.innerText;
+            row.appendChild(titleCell);
+
+            const pagingCell = document.createElement('div');
+            pagingCell.className = 'excel-cell col-paging';
+            if (pagingEl) {
+                const pc = pagingEl.cloneNode(true);
+                pc.querySelectorAll('a').forEach(a => a.target = '_self');
+                pagingCell.appendChild(pc);
+            } else pagingCell.textContent = '-';
+            row.appendChild(pagingCell);
+
+            tableWrap.appendChild(row);
+        });
+
+        const first = document.querySelector('.dTitle');
+        if (first && first.parentNode) first.parentNode.insertBefore(tableWrap, first);
+        else document.body.appendChild(tableWrap);
+    }
+
+    // ==========================================
+    // 4B. 详情页
+    //
+    // 页面真实结构（经过两次抓包确认）：
+    //
+    // <p>...标题/时间/作者...</p>
+    // <div class="message">楼主正文</div>
+    // <br>(<a>引用</a> | <a>收藏</a> | ...)   ← 楼主操作行，游离在 .message 外
+    // <br><br><br><p>广告</p>
+    // <br><br><b>回复列表 (N)</b><br>
+    // <a name="pidXXX"></a>
+    // <div class="infobar">#2 作者 骚(0) 时间</div>
+    // <div class="message">回复正文</div>
+    // <br>===================<br>
+    // <a name="pidYYY"></a>
+    // <div class="infobar">...</div>
+    // <div class="message">...</div>
+    // ...
+    // ==========================================
+    function buildThreadTable() {
+        const existing = document.getElementById('tgfc-thread-table');
+        if (existing) {
+            existing.style.display = 'table';
+            const bc = document.getElementById('tgfc-breadcrumb');
+            if (bc) bc.style.display = '';
+            document.querySelectorAll('#scroller .infobar, #scroller .message').forEach(el => el.style.display = 'none');
+            // 确保原始 <p> 仍然隐藏
+            const scr0 = document.getElementById('scroller') || document.body;
+            const p0 = scr0.querySelector('p');
+            if (p0) p0.style.display = 'none';
+            const pf = document.getElementById('postform');
+            if (pf) pf.style.display = 'none';
+            return;
+        }
+
+        const scroller = document.getElementById('scroller') || document.body;
+
+        // ---- 从 <p> 提取帖子元信息 ----
+        const infoPara = scroller.querySelector('p');
+        let threadTitle = '', threadTime = '', threadAuthorName = '', threadAuthorHref = '';
+        if (infoPara) {
+            const raw = infoPara.innerHTML;
+            const tMatch = raw.match(/标题[：:]([\s\S]*?)<br/i);
+            if (tMatch) {
+                const tmp = document.createElement('div');
+                tmp.innerHTML = tMatch[1];
+                threadTitle = tmp.innerText.trim();
+            }
+            const timeMatch = infoPara.innerText.match(/时间[：:]\s*(\S+)/);
+            if (timeMatch) threadTime = timeMatch[1].trim();
+            const aLink = infoPara.querySelector('a[href*="action=my"]');
+            if (aLink) { threadAuthorName = aLink.innerText.trim(); threadAuthorHref = aLink.href; }
+        }
+
+        const table = document.createElement('table');
+        table.id = 'tgfc-thread-table';
+
+        // 标题行
+        if (threadTitle) {
+            const htr = document.createElement('tr');
+            htr.className = 'thread-title-row';
+            const htd = document.createElement('td');
+            htd.colSpan = 3;
+            htd.innerHTML = `<b>${escHtml(threadTitle)}</b>` +
+                (threadTime ? `　<span style="font-weight:normal;color:#4a7c59;font-size:10pt;">时间: ${escHtml(threadTime)}</span>` : '') +
+                (threadAuthorName ? `　<span style="font-weight:normal;color:#4a7c59;font-size:10pt;">楼主: <a href="${threadAuthorHref}" style="color:#1a6fc4;text-decoration:none;">${escHtml(threadAuthorName)}</a></span>` : '');
+            htr.appendChild(htd);
+            table.appendChild(htr);
+        }
+
+        // ---- 找到所有 .message 和 .infobar ----
+        const allMessages = Array.from(scroller.querySelectorAll('.message'));
+        const allInfobars = Array.from(scroller.querySelectorAll('.infobar'));
+
+        // 与 infobar 配对的 message（infobar 的下一个非BR兄弟节点）
+        const replyMsgSet = new Set();
+        allInfobars.forEach(bar => {
+            const msg = nextNonBr(bar);
+            if (msg && msg.classList.contains('message')) replyMsgSet.add(msg);
+        });
+
+        // 楼主帖 = 不属于任何 infobar 配对的第一个 .message
+        const mainMsg = allMessages.find(m => !replyMsgSet.has(m));
+        if (mainMsg) {
+            addPostRow(table, 1, threadAuthorName, threadAuthorHref, mainMsg, threadTime, '楼主');
+            mainMsg.style.display = 'none';
+        }
+
+        // 回复帖
+        allInfobars.forEach((bar, i) => {
+            // 楼号：<b><a>#N</a></b>
+            const floorEl = bar.querySelector('b > a');
+            const floorNum = floorEl ? floorEl.innerText.replace('#', '').trim() : String(i + 2);
+
+            // 作者：infobar 内第2个 <a>（第1个是楼号）
+            const authorLinks = bar.querySelectorAll('a');
+            let authorName = '', authorHref = '';
+            if (authorLinks.length >= 2) {
+                authorName = authorLinks[1].innerText.trim();
+                authorHref = authorLinks[1].href;
+            }
+
+            // 时间
+            const nf = bar.querySelector('.nf');
+            const postTime = nf ? nf.innerText.trim() : '';
+
+            // 配对的 message
+            const msgEl = replyMsgSet.has(nextNonBr(bar)) ? nextNonBr(bar) : null;
+
+            addPostRow(table, parseInt(floorNum) || (i + 2), authorName, authorHref, msgEl, postTime, '');
+            bar.style.display = 'none';
+            if (msgEl) msgEl.style.display = 'none';
+        });
+
+        // ---- 回复输入框行 ----
+        const postForm = document.getElementById('postform');
+        if (postForm) {
+            const rtr = document.createElement('tr');
+            rtr.id = 'tgfc-reply-row';
+            const rtd = document.createElement('td');
+            rtd.colSpan = 3;
+            const origTA = postForm.querySelector('textarea[name="message"]') || postForm.querySelector('textarea');
+            const origSubmit = postForm.querySelector('input[type="submit"]');
+            if (origTA) {
+                rtd.innerHTML = '<span style="color:#888;font-size:10pt;margin-right:6px;">快速回复：</span>';
+                const ta = document.createElement('textarea');
+                ta.placeholder = '输入回复内容…';
+                rtd.appendChild(ta);
+                const sub = document.createElement('button');
+                sub.className = 'reply-submit';
+                sub.textContent = '发送';
+                sub.addEventListener('click', () => {
+                    if (!ta.value.trim()) { alert('回复内容不能为空'); return; }
+                    // 把内容写入原始表单的 textarea
+                    origTA.value = ta.value;
+                    // 触发原始 submit 按钮的 click，让 name="submit" 字段一起提交
+                    // 服务器端通常靠 name="submit" 判断是否合法提交
+                    if (origSubmit) {
+                        origSubmit.click();
+                    } else {
+                        postForm.submit();
+                    }
+                });
+                rtd.appendChild(sub);
+            }
+            rtr.appendChild(rtd);
+            table.appendChild(rtr);
+            // 移到屏幕外而非 display:none，避免 submit 被浏览器拦截
+            postForm.style.position = 'fixed';
+            postForm.style.top = '-9999px';
+            postForm.style.left = '-9999px';
+            postForm.style.opacity = '0';
+            postForm.style.pointerEvents = 'none';
+        }
+
+        // ---- 面包屑导航条（表格上方，TGFC俱乐部 >> 灌水与情感 >> 帖子标题） ----
+        const breadcrumbDiv = document.createElement('div');
+        breadcrumbDiv.id = 'tgfc-breadcrumb';
+        // 从原始 <p> 中提取导航链接（主站 + 版块）
+        const infoPara2 = scroller.querySelector('p');
+        let bcHTML = '';
+        if (infoPara2) {
+            const navLinks = Array.from(infoPara2.querySelectorAll('a')).filter(a => {
+                const href = a.href || '';
+                return href.includes('action=home') || href.includes('action=forum') ||
+                       (href.includes('index.php') && !href.includes('action='));
+            }).slice(0, 2);
+            if (navLinks.length) {
+                bcHTML = navLinks.map(a =>
+                    `<a href="${a.href}" target="_self">${escHtml(a.innerText.trim())}</a>`
+                ).join('<span class="bc-sep">>></span>');
+                if (threadTitle) {
+                    const short = threadTitle.length > 50 ? threadTitle.slice(0, 50) + '…' : threadTitle;
+                    bcHTML += `<span class="bc-sep">>></span><span>${escHtml(short)}</span>`;
+                }
+            }
+        }
+        breadcrumbDiv.innerHTML = bcHTML || escHtml(document.title);
+
+        // 隐藏原始 <p>（面包屑+操作链接），用我们自己的替代
+        if (infoPara2) infoPara2.style.display = 'none';
+
+        // 插到第一个 .infobar 或 .message 之前
+        const anchor = scroller.querySelector('.infobar') || scroller.querySelector('.message');
+        if (anchor && anchor.parentNode) {
+            anchor.parentNode.insertBefore(breadcrumbDiv, anchor);
+            anchor.parentNode.insertBefore(table, anchor);
+        } else {
+            scroller.appendChild(breadcrumbDiv);
+            scroller.appendChild(table);
+        }
+
+        // 【修复3】隐藏游离的分隔线文本节点（=======）和楼主帖后的操作行 (<br>(引用|收藏...))
+        // 遍历 scroller 直接子节点，隐藏 ===开头的文本节点和游离操作行
+        hideJunkNodes(scroller);
+    }
+
+    // 找 el 的下一个非 BR 兄弟元素
+    function nextNonBr(el) {
+        let next = el.nextElementSibling;
+        while (next && next.tagName === 'BR') next = next.nextElementSibling;
+        return next;
+    }
+
+    // 构建帖子行
+    function addPostRow(table, floorNum, authorName, authorHref, msgEl, postTime, badge) {
+        const tr = document.createElement('tr');
+        tr.className = 'post-row';
+
+        // A列：楼层/作者
+        const tdA = document.createElement('td');
+        tdA.className = 'td-author';
+        tdA.innerHTML = `<span class="floor-num">#${floorNum}</span>` +
+            (authorHref
+                ? `<a class="author-name" href="${authorHref}" target="_self">${escHtml(authorName||'匿名')}</a>`
+                : `<span class="author-name">${escHtml(authorName||'匿名')}</span>`) +
+            (badge ? `<span class="post-badge">${badge}</span>` : '');
+        tr.appendChild(tdA);
+
+        // B列：内容
+        const tdC = document.createElement('td');
+        tdC.className = 'td-content';
+        if (msgEl) {
+            const clone = msgEl.cloneNode(true);
+            // 去除首行 "posted by wap, platform: xxx<br>"
+            stripPostedBy(clone);
+            // 去除内嵌广告
+            clone.querySelectorAll('ins, p:has(ins)').forEach(el => el.remove());
+            tdC.innerHTML = clone.innerHTML;
+        } else {
+            tdC.textContent = '（内容为空）';
+        }
+        tr.appendChild(tdC);
+
+        // C列：时间/操作
+        const tdM = document.createElement('td');
+        tdM.className = 'td-meta';
+        if (postTime) {
+            const ts = document.createElement('span');
+            ts.className = 'post-time';
+            ts.textContent = postTime;
+            tdM.appendChild(ts);
+        }
+        // 从 infobar 的上方找引用链接（对于回复帖）
+        // 【修复4】引用链接实际在楼主帖 .message 之后的游离 (<a>引用</a>|...) 里
+        // 对于回复帖，引用链接在 infobar 的 b>a 里
+        if (msgEl) {
+            // 先检查 message 后面是否有游离引用链接（楼主帖结构）
+            let quoteHref = '';
+            let sibling = msgEl.nextSibling;
+            // 找下一个包含"引用"文字的 a
+            for (let i = 0; i < 5 && sibling; i++) {
+                if (sibling.nodeType === 1) { // element
+                    const qa = sibling.querySelector ? sibling.querySelector('a[href*="do=reply"]') : null;
+                    if (qa) { quoteHref = qa.href; break; }
+                    if (sibling.tagName === 'DIV' || sibling.classList?.contains('infobar')) break;
+                }
+                sibling = sibling.nextSibling;
+            }
+            // 回复帖：从对应 infobar 的 b>a 里拿引用 href
+            if (!quoteHref) {
+                let prevEl = msgEl.previousElementSibling;
+                while (prevEl && prevEl.tagName === 'BR') prevEl = prevEl.previousElementSibling;
+                if (prevEl && prevEl.classList?.contains('infobar')) {
+                    const qa = prevEl.querySelector('b > a[href*="do=reply"]');
+                    if (qa) quoteHref = qa.href;
+                }
+            }
+            if (quoteHref) {
+                const la = document.createElement('a');
+                la.href = quoteHref; la.target = '_self'; la.textContent = '引用';
+                tdM.appendChild(la);
+            }
+        }
+        tr.appendChild(tdM);
+        table.appendChild(tr);
+    }
+
+    // 隐藏游离的垃圾节点：===分隔线、楼主操作行、"回复列表(N)"标题
+    function hideJunkNodes(scroller) {
+        // 1. 把所有文本节点中的 === 清空
+        const walker = document.createTreeWalker(scroller, NodeFilter.SHOW_TEXT, null);
+        let node;
+        while ((node = walker.nextNode())) {
+            if (/^=+$/.test(node.textContent.trim())) node.textContent = '';
+        }
+
+        // 2. 隐藏游离的操作链接（引用/收藏/评分/显图）
+        //    这些链接不在 .infobar / .message / 表格内部，是楼主帖后面的裸链接
+        scroller.querySelectorAll('a').forEach(a => {
+            if (a.closest('.infobar') || a.closest('.message') || a.closest('#tgfc-thread-table')) return;
+            const href = a.href || '';
+            const txt  = a.textContent.trim();
+            if (href.includes('do=reply') || href.includes('do=fav') ||
+                txt === '收藏' || txt === '评分' || txt === '显图' || txt === '引用') {
+                // 清理周边的分隔文本 " | " 和括号
+                [a.previousSibling, a.nextSibling].forEach(sib => {
+                    if (sib && sib.nodeType === 3) {
+                        const cleaned = sib.textContent.replace(/\s*\|\s*/g, '').replace(/[()]/g, '').trim();
+                        if (cleaned === '') sib.textContent = '';
+                    }
+                });
+                a.style.display = 'none';
+            }
+        });
+
+        // 3. 清理剩余的孤立括号/竖线文本节点
+        scroller.childNodes.forEach(n => {
+            if (n.nodeType === 3 && /^[\s()|]*$/.test(n.textContent)) n.textContent = '';
+        });
+
+        // 4. 隐藏 <b>回复列表 (N)</b> 标题
+        scroller.querySelectorAll('b').forEach(b => {
+            if (/回复列表/.test(b.textContent)) b.style.display = 'none';
+        });
+    }
+
+    function stripPostedBy(el) {
+        const firstBr = el.querySelector('br');
+        if (!firstBr) return;
+        const prev = firstBr.previousSibling;
+        if (prev && prev.nodeType === 3 && /posted by/i.test(prev.textContent)) {
+            prev.textContent = '';
+            firstBr.remove();
+        }
+    }
+
+    function escHtml(s) {
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // ==========================================
+    // 5. 面包屑 → 公式栏
+    // ==========================================
+    function initBreadcrumb() {
+        const fc = document.getElementById('formula-bar-content');
+        if (!fc) return;
+
+        // 【修复5】用 scroller 内第一个 <p> 而不是模糊的 document.querySelector
+        const scroller = document.getElementById('scroller') || document.body;
+        const p = scroller.querySelector('p');
+        let html = '';
+
+        if (p) {
+            // 取前两个导航链接（主站 + 版块），过滤掉操作类链接（刷新/显图/回复/发表...）
+            const navLinks = Array.from(p.querySelectorAll('a')).filter(a => {
+                const href = a.href || '';
+                return (href.includes('action=home') || href.includes('action=forum') ||
+                        (href.includes('index.php') && !href.includes('action=')));
+            }).slice(0, 2);
+
+            if (navLinks.length) {
+                html = navLinks.map(a =>
+                    `<a href="${a.href}" target="_self">${escHtml(a.innerText.trim())}</a>`
+                ).join(' <em>›</em> ');
+
+                if (isThreadPage && threadTitle_global) {
+                    const short = threadTitle_global.length > 30 ? threadTitle_global.slice(0, 30) + '…' : threadTitle_global;
+                    html += ` <em>›</em> <span style="color:#217346;">${escHtml(short)}</span>`;
+                }
+            }
+        }
+        if (!html) html = escHtml(document.title);
+        fc.innerHTML = html;
+        fc.dataset.defaultHtml = html;
+    }
+
+    // 暂存帖子标题供面包屑使用
+    let threadTitle_global = '';
+    if (isThreadPage) {
+        const scroller = document.getElementById('scroller') || document.body;
+        const p = scroller.querySelector('p');
+        if (p) {
+            const b = p.querySelector('b');
+            if (b) threadTitle_global = b.innerText.trim();
+        }
+    }
+
+    // ==========================================
+    // 6. Sheet 翻页标签栏
+    // ==========================================
+    function initSheetPagination() {
+        const sc = document.getElementById('excel-sheets-scroll');
+        if (!sc) return;
+        sc.innerHTML = '';
+
+        const currentPage = urlParams.get('page') || '1';
+        const seen = new Set();
+
+        // 【修复6】只找帖子详情分页链接（同 tid 的 page 参数）
+        // 列表页找 forum action 的 page 参数
+        const pageLinks = Array.from(document.querySelectorAll('a[href*="page="]')).filter(a => {
+            try {
+                const u = new URL(a.href);
+                const pg = u.searchParams.get('page');
+                if (!pg) return false;
+                // 详情页只要同 tid 的翻页，不要帖子内容里的分页
+                if (isThreadPage) {
+                    const tid = urlParams.get('tid');
+                    return tid && u.searchParams.get('tid') === tid && u.searchParams.get('action') === 'thread';
+                }
+                // 列表页只要同 fid 的翻页
+                const fid = urlParams.get('fid');
+                return fid && u.searchParams.get('fid') === fid && u.searchParams.get('action') === 'forum';
+            } catch(e) { return false; }
+        });
+
+        // 先加当前页（激活态）
+        const curTab = document.createElement('div');
+        curTab.className = 'sheet-tab active';
+        curTab.textContent = `第${currentPage}页`;
+        sc.appendChild(curTab);
+        seen.add(currentPage);
+
+        pageLinks.forEach(a => {
+            const pg = new URL(a.href).searchParams.get('page');
+            if (!pg || seen.has(pg)) return;
+            seen.add(pg);
+            const tab = document.createElement('a');
+            tab.className = 'sheet-tab';
+            tab.textContent = `第${pg}页`;
+            tab.href = a.href; tab.target = '_self';
+            sc.appendChild(tab);
+        });
+
+        // 如果没找到任何翻页，显示默认 Sheet1
+        if (sc.children.length === 1 && pageLinks.length === 0) {
+            sc.children[0].textContent = 'Sheet1';
+        }
+    }
+
+    // ==========================================
+    // 7. 公式栏悬停
+    // ==========================================
+    function initFormulaBarHover() {
+        const fc = document.getElementById('formula-bar-content');
+        if (!fc) return;
+        const wrap = document.getElementById('tgfc-excel-table-wrap') ||
+                     document.getElementById('tgfc-thread-table');
+        if (!wrap) return;
+
+        wrap.addEventListener('mouseover', e => {
+            if (!isWorkMode) return;
+            const cell = e.target.closest('.excel-cell,.td-content,.td-author,.td-meta');
+            if (cell) {
+                const t = (cell.title || cell.innerText).trim().slice(0, 120);
+                if (t) fc.textContent = t;
+            }
+        });
+        wrap.addEventListener('mouseleave', () => {
+            if (!isWorkMode) return;
+            const d = fc.dataset.defaultHtml;
+            if (d) { fc.innerHTML = d; fc.querySelectorAll('a').forEach(a => a.target = '_self'); }
+        });
+    }
+
+})();
