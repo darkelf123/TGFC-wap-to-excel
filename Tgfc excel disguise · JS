@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TGFC摸鱼助手(Excel伪装)
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      4.0
 // @description  把 TGFC WAP论坛伪装成 Excel 表格。支持帖子列表页和帖子详情页。
 // @author       Based on S1摸鱼助手 by Gemini, adapted for TGFC
 // @match        *://s.tgfcer.com/wap/*
