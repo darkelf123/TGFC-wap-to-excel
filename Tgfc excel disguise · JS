@@ -27,6 +27,7 @@
     // ==========================================
     const urlParams = new URLSearchParams(location.search);
     const isThreadPage = urlParams.get('action') === 'thread';
+    const isHomePage   = urlParams.get('action') === 'home' || urlParams.get('action') === null && document.querySelector('.forumlist') !== null;
 
     let isWorkMode = localStorage.getItem('tgfc_excel_mode') === 'true';
 
@@ -146,6 +147,20 @@
         #tgfc-breadcrumb .bc-sep {
             color:#999;
             margin:0 4px;
+        }
+
+        /* ── 主页（板块目录）── */
+        body.excel-mode #tgfc-home-table-wrap {
+            width:100%; display:table; border-collapse:collapse; table-layout:auto;
+        }
+        body.excel-mode .home-group-row .excel-cell {
+            background:#e8f5e9 !important;
+        }
+        body.excel-mode .home-group-cell {
+            font-weight:bold; color:#1b5e20; font-size:11pt; padding-left:6px !important;
+        }
+        body.excel-mode .home-header-row .excel-cell {
+            height:22px; line-height:22px;
         }
 
         /* ── 列表页 ── */
@@ -312,7 +327,9 @@
         // 给 body 加页面类型标记，供 CSS 区分列表页/详情页
         document.body.classList.add(isThreadPage ? 'thread-page' : 'forum-page');
         document.title = 'Business_Report_2025.xlsx - Excel';
-        if (isThreadPage) buildThreadTable(); else buildForumTable();
+        if (isThreadPage) buildThreadTable();
+        else if (isHomePage) buildHomeTable();
+        else buildForumTable();
         initBreadcrumb();
         initSheetPagination();
         initFormulaBarHover();
@@ -340,11 +357,141 @@
                 pf.style.opacity = '';
                 pf.style.pointerEvents = '';
             }
+        } else if (isHomePage) {
+            const w = document.getElementById('tgfc-home-table-wrap');
+            if (w) w.style.display = 'none';
+            const fl = document.querySelector('.forumlist');
+            if (fl) fl.style.display = '';
+            const hu = document.getElementById('hometop');
+            if (hu) hu.style.display = '';
         } else {
             const w = document.getElementById('tgfc-excel-table-wrap');
             if (w) w.style.display = 'none';
             document.querySelectorAll('.dTitle').forEach(el => el.style.display = '');
         }
+    }
+
+    // ==========================================
+    // 4A-0. 主页（板块目录）
+    // 结构：.forumlist 内是纯文本+链接，分组用 <b>大类名</b>，子版块用 <a> 链接
+    // 今日新帖数紧跟链接后面，格式为 (N)
+    // ==========================================
+    function buildHomeTable() {
+        const existing = document.getElementById('tgfc-home-table-wrap');
+        if (existing) {
+            existing.style.display = 'table';
+            const fl = document.querySelector('.forumlist');
+            if (fl) fl.style.display = 'none';
+            const hu = document.getElementById('hometop');
+            if (hu) hu.style.display = 'none';
+            return;
+        }
+
+        const forumlist = document.querySelector('.forumlist');
+        if (!forumlist) return;
+
+        // 解析 forumlist 的 HTML，提取板块链接和分组标题
+        // 结构：+ <b>分类名</b><br> - <a href>版块名</a>(N)<br>...
+        const tableWrap = document.createElement('div');
+        tableWrap.id = 'tgfc-home-table-wrap';
+
+        // 列头行（与列表页列头格式一致）
+        const headerRow = document.createElement('div');
+        headerRow.className = 'excel-row home-header-row';
+        headerRow.innerHTML = `
+            <div class="excel-cell row-idx" style="background:#217346;color:white;font-weight:bold;">#</div>
+            <div class="excel-cell" style="background:#217346;color:white;font-weight:bold;flex:1;">板块名称</div>
+            <div class="excel-cell" style="background:#217346;color:white;font-weight:bold;width:80px;text-align:center;">今日新帖</div>
+        `;
+        tableWrap.appendChild(headerRow);
+
+        // 遍历 forumlist 的子节点，识别分类标题和版块链接
+        let rowIdx = 1;
+        const nodes = Array.from(forumlist.childNodes);
+        let i = 0;
+        while (i < nodes.length) {
+            const node = nodes[i];
+
+            // 分类标题：<b>xxx</b>
+            if (node.nodeType === 1 && node.tagName === 'B') {
+                const groupRow = document.createElement('div');
+                groupRow.className = 'excel-row home-group-row';
+                groupRow.innerHTML = `
+                    <div class="excel-cell row-idx" style="background:#e8f5e9;"></div>
+                    <div class="excel-cell home-group-cell" style="flex:1;">${node.textContent.trim()}</div>
+                    <div class="excel-cell" style="width:80px;background:#e8f5e9;"></div>
+                `;
+                tableWrap.appendChild(groupRow);
+                i++; continue;
+            }
+
+            // 版块链接：<a href="...action=forum&fid=N">版块名</a>
+            if (node.nodeType === 1 && node.tagName === 'A' && (node.href || '').includes('action=forum')) {
+                const row = document.createElement('div');
+                row.className = 'excel-row';
+
+                // 计算缩进层级（前面的 &nbsp;- 数量）
+                // 前一个文本节点包含 "-" 数量
+                const prevText = nodes[i - 1];
+                let indent = 0;
+                if (prevText && prevText.nodeType === 3) {
+                    indent = (prevText.textContent.match(/-/g) || []).length;
+                }
+                const paddingLeft = indent > 1 ? '24px' : (indent === 1 ? '8px' : '0px');
+
+                // 今日新帖数：紧跟 <a> 后面的文本节点，格式 "(N)"
+                let newCount = '';
+                const nextNode = nodes[i + 1];
+                if (nextNode && nextNode.nodeType === 3) {
+                    const m = nextNode.textContent.match(/\((\d+)\)/);
+                    if (m) newCount = m[1];
+                }
+
+                const idxCell = document.createElement('div');
+                idxCell.className = 'excel-cell row-idx';
+                idxCell.textContent = rowIdx++;
+                row.appendChild(idxCell);
+
+                const nameCell = document.createElement('div');
+                nameCell.className = 'excel-cell col-title';
+                nameCell.style.flex = '1';
+                nameCell.style.paddingLeft = paddingLeft;
+                const a = document.createElement('a');
+                a.href = node.href;
+                a.target = '_self';
+                a.textContent = node.textContent.trim();
+                nameCell.appendChild(a);
+                row.appendChild(nameCell);
+
+                const countCell = document.createElement('div');
+                countCell.className = 'excel-cell';
+                countCell.style.width = '80px';
+                countCell.style.textAlign = 'center';
+                countCell.style.color = newCount ? '#217346' : '#ccc';
+                countCell.style.fontWeight = newCount ? 'bold' : 'normal';
+                countCell.textContent = newCount ? newCount : '-';
+                row.appendChild(countCell);
+
+                tableWrap.appendChild(row);
+                i++; continue;
+            }
+
+            i++;
+        }
+
+        // 隐藏原始 forumlist 和 hometop（用户信息区），插入表格
+        forumlist.style.display = 'none';
+        const hometop = document.getElementById('hometop');
+        if (hometop) hometop.style.display = 'none';
+
+        // 插入到 forumlist 位置
+        forumlist.parentNode.insertBefore(tableWrap, forumlist);
+
+        // 同时隐藏多余的 <p> 节点（"= 论坛板块 ="那一行）
+        const scroller = document.getElementById('scroller') || document.body;
+        scroller.querySelectorAll('p').forEach(p => {
+            if (p.textContent.includes('论坛板块')) p.style.display = 'none';
+        });
     }
 
     // ==========================================
@@ -658,35 +805,53 @@
             ts.textContent = postTime;
             tdM.appendChild(ts);
         }
-        // 从 infobar 的上方找引用链接（对于回复帖）
-        // 【修复4】引用链接实际在楼主帖 .message 之后的游离 (<a>引用</a>|...) 里
-        // 对于回复帖，引用链接在 infobar 的 b>a 里
         if (msgEl) {
-            // 先检查 message 后面是否有游离引用链接（楼主帖结构）
-            let quoteHref = '';
-            let sibling = msgEl.nextSibling;
-            // 找下一个包含"引用"文字的 a
-            for (let i = 0; i < 5 && sibling; i++) {
-                if (sibling.nodeType === 1) { // element
-                    const qa = sibling.querySelector ? sibling.querySelector('a[href*="do=reply"]') : null;
-                    if (qa) { quoteHref = qa.href; break; }
-                    if (sibling.tagName === 'DIV' || sibling.classList?.contains('infobar')) break;
+            // ---- 楼主帖：操作链接在 .message 之后的游离节点里，格式：<br>(<a>引用</a> | <a>收藏</a> | ...) ----
+            // ---- 回复帖：只有引用链接，在对应 infobar 的 <b><a> 里 ----
+            const ACTION_LABELS = ['引用', '收藏', '评分', '显图'];
+
+            // 收集楼主帖游离操作链接
+            const floatingLinks = [];
+            let sib = msgEl.nextSibling;
+            let scanCount = 0;
+            while (sib && scanCount < 10) {
+                if (sib.nodeType === 1) {
+                    // 遇到下一个实质性块元素就停止扫描
+                    if (sib.tagName === 'DIV' || sib.tagName === 'TABLE' ||
+                        sib.classList?.contains('infobar')) break;
+                    // 收集 <a> 链接
+                    if (sib.tagName === 'A') {
+                        const txt = sib.textContent.trim();
+                        if (ACTION_LABELS.includes(txt)) floatingLinks.push(sib);
+                    }
                 }
-                sibling = sibling.nextSibling;
+                sib = sib.nextSibling;
+                scanCount++;
             }
-            // 回复帖：从对应 infobar 的 b>a 里拿引用 href
-            if (!quoteHref) {
+
+            if (floatingLinks.length > 0) {
+                // 楼主帖：把所有操作链接克隆进 C 列
+                floatingLinks.forEach((a, idx) => {
+                    if (idx > 0) {
+                        const sep = document.createTextNode(' | ');
+                        tdM.appendChild(sep);
+                    }
+                    const la = a.cloneNode(true);
+                    la.target = '_self';
+                    tdM.appendChild(la);
+                });
+            } else {
+                // 回复帖：只提取引用链接（在对应 infobar 的 <b><a> 里）
                 let prevEl = msgEl.previousElementSibling;
                 while (prevEl && prevEl.tagName === 'BR') prevEl = prevEl.previousElementSibling;
                 if (prevEl && prevEl.classList?.contains('infobar')) {
                     const qa = prevEl.querySelector('b > a[href*="do=reply"]');
-                    if (qa) quoteHref = qa.href;
+                    if (qa) {
+                        const la = document.createElement('a');
+                        la.href = qa.href; la.target = '_self'; la.textContent = '引用';
+                        tdM.appendChild(la);
+                    }
                 }
-            }
-            if (quoteHref) {
-                const la = document.createElement('a');
-                la.href = quoteHref; la.target = '_self'; la.textContent = '引用';
-                tdM.appendChild(la);
             }
         }
         tr.appendChild(tdM);
@@ -757,6 +922,13 @@
         const scroller = document.getElementById('scroller') || document.body;
         const p = scroller.querySelector('p');
         let html = '';
+
+        // 主页：直接显示站点名
+        if (isHomePage) {
+            html = '<a href="' + location.href + '" target="_self" style="color:#333;">TGFC俱乐部</a> <em>›</em> <span style="color:#217346;">论坛板块</span>';
+            if (fc) { fc.innerHTML = html; fc.dataset.defaultHtml = html; }
+            return;
+        }
 
         if (p) {
             // 取前两个导航链接（主站 + 版块），过滤掉操作类链接（刷新/显图/回复/发表...）
