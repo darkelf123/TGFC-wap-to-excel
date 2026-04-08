@@ -114,7 +114,7 @@ wap.tgfcer.com/*
 
 ## 致谢
 
-本脚本基于 [S1摸鱼助手(excel)](https://greasyfork.org/scripts/557042) 的思路，由 Gemini 原创，针对 TGFC WAP 页面结构重新适配开发。
+本脚本基于 [S1摸鱼助手(excel)](https://greasyfork.org/scripts/557042) 的思路，由 Gemini及claude 原创，针对 TGFC WAP 页面结构重新适配开发。
 
 ---
 
