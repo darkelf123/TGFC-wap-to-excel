@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TGFC摸鱼助手(Excel伪装)
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      5.0
 // @description  把 TGFC WAP论坛伪装成 Excel 表格。支持帖子列表页和帖子详情页。
 // @author       Based on S1摸鱼助手 by Gemini, adapted for TGFC
 // @match        *://s.tgfcer.com/wap/*
@@ -30,6 +30,89 @@
     const isHomePage   = urlParams.get('action') === 'home' || urlParams.get('action') === null && document.querySelector('.forumlist') !== null;
 
     let isWorkMode = localStorage.getItem('tgfc_excel_mode') === 'true';
+
+    // ── 在任何 DOM 操作之前，先收集翻页数据 ──
+    // 此时 DOM 完全原始，innerText 正常，原始 HTML 未被改动
+    const pagingData = (function collectPaging() {
+        const currentPage = urlParams.get('page') || '1';
+        const seen = new Set([currentPage]);
+        const tabs = [];
+
+        function addTab(pg, href) {
+            pg = String(pg);
+            if (!pg || seen.has(pg)) return;
+            seen.add(pg);
+            tabs.push({ text: '第' + pg + '页', href: href });
+        }
+
+        if (isThreadPage) {
+            // ── DOM 方法：遍历所有 .paging a 链接 ──
+            // 不限 class="s2"，也不依赖 innerText，直接从 href 提取 page 参数
+            document.querySelectorAll('.paging a').forEach(a => {
+                let pg = null;
+                try { pg = new URL(a.href).searchParams.get('page'); } catch(e) {}
+                if (!pg) { const m = (a.getAttribute('href') || '').match(/page=(\d+)/); if (m) pg = m[1]; }
+                addTab(pg, a.href);
+            });
+
+            // ── 原始HTML方法：从 innerHTML 中正则提取所有 page=N 链接 ──
+            // 这是最可靠的兜底，不受任何 display 状态影响
+            try {
+                const rawHtml = document.documentElement.innerHTML;
+                // 找所有 .paging 区间（可能有多个 span）
+                const pagingRe = /class="paging"[\s\S]*?(?=<form|<div id="footer"|<br><br><form)/g;
+                let pm;
+                while ((pm = pagingRe.exec(rawHtml)) !== null) {
+                    const block = pm[0];
+                    const linkRe = /href="([^"]*page=(\d+)[^"]*)"/g;
+                    let lm;
+                    while ((lm = linkRe.exec(block)) !== null) {
+                        const href = lm[1].replace(/&amp;/g, '&');
+                        addTab(lm[2], href);
+                    }
+                }
+            } catch(e) {}
+
+            // ── 补全缺失页码（从 N/M页 提取总页数）──
+            let totalPages = 0;
+            document.querySelectorAll('.paging').forEach(sp => {
+                const m = (sp.innerHTML || '').match(/(\d+)\/(\d+)/);
+                if (m) totalPages = Math.max(totalPages, parseInt(m[2]));
+            });
+            if (totalPages === 0) {
+                const m = (document.documentElement.innerHTML || '').match(/(\d+)\/(\d+)页/);
+                if (m) totalPages = parseInt(m[2]);
+            }
+            if (totalPages > 1 && tabs.length > 0) {
+                const tmplHref = tabs[0].href;
+                for (let pg = 2; pg <= totalPages; pg++) {
+                    if (seen.has(String(pg))) continue;
+                    let href = tmplHref.replace(/([?&]page=)\d+/, '$1' + pg);
+                    if (!href.includes('page=' + pg)) href += (href.includes('?') ? '&' : '?') + 'page=' + pg;
+                    addTab(pg, href);
+                }
+            }
+
+            // 按页码数字排序
+            tabs.sort((a, b) => parseInt(a.text) - parseInt(b.text));
+
+        } else if (!isHomePage) {
+            // ── 列表页翻页 ──
+            const fid = urlParams.get('fid');
+            document.querySelectorAll('a[href*="page="]').forEach(a => {
+                try {
+                    const u = new URL(a.href);
+                    if (u.searchParams.get('action') !== 'forum') return;
+                    if (fid && u.searchParams.get('fid') !== fid) return;
+                    const pg = u.searchParams.get('page');
+                    addTab(pg, a.href);
+                } catch(e) {}
+            });
+            tabs.sort((a, b) => parseInt(a.text) - parseInt(b.text));
+        }
+
+        return { currentPage, tabs };
+    })();
 
     // ==========================================
     // 1. 注入 Excel 顶部 UI HTML
@@ -85,7 +168,7 @@
             <div class="sheet-add-btn">+</div>
         </div>
         <div id="excel-footer-bar">
-            <span>就绪</span>
+            <span>就绪&nbsp;&nbsp;<span style="color:#aaa;font-size:10px;">v4.0</span></span>
             <span style="float:right;margin-right:20px;">-------+ -- 100%</span>
         </div>
     `;
@@ -120,6 +203,14 @@
 
         /* 列表页隐藏顶部 <p>（面包屑+操作）；详情页单独处理 */
         body.excel-mode.forum-page #scroller > p
+        { display:none !important; }
+
+        /* 详情页：隐藏所有会产生空白的游离元素 */
+        body.excel-mode.thread-page #scroller > span.paging,
+        body.excel-mode.thread-page #scroller > br,
+        body.excel-mode.thread-page #scroller > p:empty,
+        body.excel-mode.thread-page #scroller > a[name],
+        body.excel-mode.thread-page #scroller > b:not([class])
         { display:none !important; }
 
         /* 详情页：原始 <p> 中操作链接全部隐藏，只保留面包屑 */
@@ -313,13 +404,21 @@
         }
     });
 
-    if (isWorkMode) enableExcel();
+    if (isWorkMode) {
+        // 延迟执行，确保页面自身的 JS（如 shiropika.js）先完成 DOM 操作
+        // 直接点击按钮不需要延迟（用户手动触发时 DOM 已完全稳定）
+        setTimeout(enableExcel, 0);
+    }
 
     function toggleMode() {
         isWorkMode = !isWorkMode;
         localStorage.setItem('tgfc_excel_mode', isWorkMode);
         btn.textContent = isWorkMode ? '退出摸鱼' : '摸鱼模式';
-        if (isWorkMode) enableExcel(); else disableExcel();
+        if (isWorkMode) {
+        // 延迟执行，确保页面自身的 JS（如 shiropika.js）先完成 DOM 操作
+        // 直接点击按钮不需要延迟（用户手动触发时 DOM 已完全稳定）
+        setTimeout(enableExcel, 0);
+    } else disableExcel();
     }
 
     function enableExcel() {
@@ -345,9 +444,12 @@
             if (bc) bc.style.display = 'none';
             // 恢复原始 <p>
             const scr1 = document.getElementById('scroller') || document.body;
-            const p1 = scr1.querySelector('p');
+            const p1 = findNavPara(scr1);
             if (p1) p1.style.display = '';
             document.querySelectorAll('#scroller .infobar, #scroller .message').forEach(el => el.style.display = '');
+            document.querySelectorAll('#scroller a[name^="pid"]').forEach(a => a.style.display = '');
+            const brHide = document.getElementById('tgfc-br-hide');
+            if (brHide) brHide.remove();
             const pf = document.getElementById('postform');
             if (pf) {
                 // 恢复 postForm 定位（摸鱼模式下移到屏幕外而非 display:none）
@@ -588,9 +690,16 @@
             const bc = document.getElementById('tgfc-breadcrumb');
             if (bc) bc.style.display = '';
             document.querySelectorAll('#scroller .infobar, #scroller .message').forEach(el => el.style.display = 'none');
+            document.querySelectorAll('#scroller a[name^="pid"]').forEach(a => a.style.display = 'none');
+            if (!document.getElementById('tgfc-br-hide')) {
+                const s = document.createElement('style');
+                s.id = 'tgfc-br-hide';
+                s.textContent = '#scroller > br { display: none !important; }';
+                document.head.appendChild(s);
+            }
             // 确保原始 <p> 仍然隐藏
             const scr0 = document.getElementById('scroller') || document.body;
-            const p0 = scr0.querySelector('p');
+            const p0 = findNavPara(scr0);
             if (p0) p0.style.display = 'none';
             const pf = document.getElementById('postform');
             if (pf) pf.style.display = 'none';
@@ -600,7 +709,7 @@
         const scroller = document.getElementById('scroller') || document.body;
 
         // ---- 从 <p> 提取帖子元信息 ----
-        const infoPara = scroller.querySelector('p');
+        const infoPara = findNavPara(scroller);
         let threadTitle = '', threadTime = '', threadAuthorName = '', threadAuthorHref = '';
         if (infoPara) {
             const raw = infoPara.innerHTML;
@@ -649,6 +758,18 @@
             addPostRow(table, 1, threadAuthorName, threadAuthorHref, mainMsg, threadTime, '楼主');
             mainMsg.style.display = 'none';
         }
+
+        // 把所有独立的 <br> 和 <a name="pidXXX"> 节点也隐藏
+        // 这些节点夹在 infobar/message 之间，虽然 infobar/message 已 display:none
+        // 但这些节点本身不在 infobar/message 里，不受影响，会产生大量空行
+        scroller.querySelectorAll('a[name^="pid"]').forEach(a => {
+            a.style.display = 'none';
+        });
+        // 用 CSS 隐藏 scroller 直接子级的 <br>（不影响帖子内容里的换行）
+        const brHideStyle = document.createElement('style');
+        brHideStyle.id = 'tgfc-br-hide';
+        brHideStyle.textContent = '#scroller > br { display: none !important; }';
+        document.head.appendChild(brHideStyle);
 
         // 回复帖
         allInfobars.forEach((bar, i) => {
@@ -721,7 +842,7 @@
         const breadcrumbDiv = document.createElement('div');
         breadcrumbDiv.id = 'tgfc-breadcrumb';
         // 从原始 <p> 中提取导航链接（主站 + 版块）
-        const infoPara2 = scroller.querySelector('p');
+        const infoPara2 = findNavPara(scroller);
         let bcHTML = '';
         if (infoPara2) {
             const navLinks = Array.from(infoPara2.querySelectorAll('a')).filter(a => {
@@ -895,6 +1016,22 @@
         scroller.querySelectorAll('b').forEach(b => {
             if (/回复列表/.test(b.textContent)) b.style.display = 'none';
         });
+
+        // 5. 隐藏底部裸露的 <span class="paging">（不在 <p> 里的那个）
+        //    结构：</div><br><br><br><span class="paging">1/4页...</span>
+        scroller.querySelectorAll('span.paging').forEach(sp => {
+            // 只隐藏不在 <p> 内的（nav <p> 里的那个已经随 <p> 一起隐藏了）
+            if (!sp.closest('p')) {
+                sp.style.display = 'none';
+                // 同时隐藏前面的兄弟 <br> 节点（避免留空行）
+                let prev = sp.previousSibling;
+                while (prev && (prev.nodeName === 'BR' || (prev.nodeType === 3 && !prev.textContent.trim()))) {
+                    const tmp = prev.previousSibling;
+                    if (prev.nodeName === 'BR') prev.style && (prev.style.display = 'none');
+                    prev = tmp;
+                }
+            }
+        });
     }
 
     function stripPostedBy(el) {
@@ -920,7 +1057,7 @@
 
         // 【修复5】用 scroller 内第一个 <p> 而不是模糊的 document.querySelector
         const scroller = document.getElementById('scroller') || document.body;
-        const p = scroller.querySelector('p');
+        const p = findNavPara(scroller);
         let html = '';
 
         // 主页：直接显示站点名
@@ -954,11 +1091,34 @@
         fc.dataset.defaultHtml = html;
     }
 
+    // 找 scroller 内包含面包屑导航的 <p>（含 TGFC 主站链接）
+    // 优先找含 .paging 或 标题: 的 <p>，其次含主站/版块链接的 <p>，广告 <p> 排除
+    function findNavPara(scroller) {
+        const all = Array.from(scroller.querySelectorAll('p'));
+        // 第一优先：含翻页组件或帖子标题的 p
+        for (const p of all) {
+            if (p.querySelector('.paging') || p.innerHTML.includes('标题:')) return p;
+        }
+        // 第二优先：含主站/版块导航链接的 p（排除广告 p）
+        for (const p of all) {
+            if (p.querySelector('a[href*="wap.tgfcer.com"]') ||
+                p.querySelector('a[href*="action=forum"]')) {
+                // 排除只有广告的 p
+                if (!p.querySelector('ins.adsbygoogle')) return p;
+            }
+        }
+        // 最后兜底：第一个非广告 p
+        for (const p of all) {
+            if (!p.querySelector('ins.adsbygoogle')) return p;
+        }
+        return all[0] || null;
+    }
+
     // 暂存帖子标题供面包屑使用
     let threadTitle_global = '';
     if (isThreadPage) {
         const scroller = document.getElementById('scroller') || document.body;
-        const p = scroller.querySelector('p');
+        const p = findNavPara(scroller);
         if (p) {
             const b = p.querySelector('b');
             if (b) threadTitle_global = b.innerText.trim();
@@ -974,50 +1134,141 @@
         sc.innerHTML = '';
 
         const currentPage = urlParams.get('page') || '1';
-        const seen = new Set();
 
-        // 【修复6】只找帖子详情分页链接（同 tid 的 page 参数）
-        // 列表页找 forum action 的 page 参数
-        const pageLinks = Array.from(document.querySelectorAll('a[href*="page="]')).filter(a => {
-            try {
-                const u = new URL(a.href);
-                const pg = u.searchParams.get('page');
-                if (!pg) return false;
-                // 详情页只要同 tid 的翻页，不要帖子内容里的分页
-                if (isThreadPage) {
-                    const tid = urlParams.get('tid');
-                    return tid && u.searchParams.get('tid') === tid && u.searchParams.get('action') === 'thread';
+        // 收集翻页数据（在此处收集比 IIFE 更可靠，此时 DOM 已完全操作完毕）
+        // 同时兼顾 pagingData（IIFE 预收集）作为补充
+        const seen = new Set([currentPage]);
+        const tabs = [];
+
+        function addTab(pg, href) {
+            pg = String(pg);
+            if (!pg || pg === 'null' || seen.has(pg)) return;
+            // href 必须是有效链接
+            if (!href || href === 'null') return;
+            seen.add(pg);
+            tabs.push({ text: '第' + pg + '页', href: href });
+        }
+
+        if (isThreadPage) {
+            // ── 方法1: 从 pagingData（IIFE 预收集）拿数据 ──
+            if (pagingData && pagingData.tabs && pagingData.tabs.length > 0) {
+                pagingData.tabs.forEach(t => addTab(
+                    t.text.replace(/[^0-9]/g, ''),
+                    t.href
+                ));
+            }
+
+            // ── 方法2: 直接从当前 DOM 的 .paging a 收集（此时 DOM 已稳定）──
+            // buildThreadTable 已执行完，.paging 在隐藏的 <p> 里，但 querySelectorAll 仍能找到
+            document.querySelectorAll('.paging a').forEach(a => {
+                // 用 getAttribute 拿原始 href（可能是相对路径）
+                const rawHref = a.getAttribute('href') || '';
+                const m = rawHref.match(/[?&]page=(\d+)/);
+                const pg = m ? m[1] : null;
+                // a.href 是浏览器解析后的完整 URL
+                addTab(pg, a.href || rawHref);
+            });
+
+            // ── 方法3: 从页面原始 HTML 正则提取（终极兜底）──
+            if (tabs.length === 0) {
+                try {
+                    const html = document.documentElement.innerHTML;
+                    const pagingM = html.match(/class="paging"[\s\S]*?\((\d+)\/(\d+)[^)]*\)/);
+                    if (pagingM) {
+                        const totalPages = parseInt(pagingM[2]);
+                        // 从 paging 块里提取所有 page=N 链接
+                        const blockEnd = html.indexOf('</span>', html.indexOf(pagingM[0])) + 7;
+                        const block = html.substring(html.indexOf(pagingM[0]), blockEnd);
+                        const linkRe = /href="([^"]*[?&](?:amp;)?page=(\d+)[^"]*)"/g;
+                        let lm;
+                        while ((lm = linkRe.exec(block)) !== null) {
+                            const href = lm[1].replace(/&amp;/g, '&');
+                            // 把相对 href 转成绝对
+                            const absHref = href.startsWith('http') ? href :
+                                location.origin + location.pathname.replace(/[^/]+$/, '') + href;
+                            addTab(lm[2], absHref);
+                        }
+                        // 补全 totalPages
+                        if (totalPages > 1 && tabs.length > 0) {
+                            const tmpl = tabs[0].href;
+                            for (let pg = 2; pg <= totalPages; pg++) {
+                                if (seen.has(String(pg))) continue;
+                                let href = tmpl.replace(/([?&]page=)\d+/, '$1' + pg);
+                                if (!href.includes('page=' + pg)) {
+                                    href += (href.includes('?') ? '&' : '?') + 'page=' + pg;
+                                }
+                                addTab(pg, href);
+                            }
+                        }
+                    }
+                } catch(e) {}
+            }
+
+            // 补全：若从 DOM 或 pagingData 拿到了某些页但不完整，用 totalPages 填满
+            let totalPages = 0;
+            document.querySelectorAll('.paging').forEach(sp => {
+                const m = (sp.innerHTML || sp.textContent || '').match(/(\d+)\/(\d+)/);
+                if (m) totalPages = Math.max(totalPages, parseInt(m[2]));
+            });
+            if (totalPages === 0) {
+                const m = (document.documentElement.innerHTML).match(/(\d+)\/(\d+)页/);
+                if (m) totalPages = parseInt(m[2]);
+            }
+            if (totalPages > 1 && tabs.length > 0) {
+                const tmpl = tabs[0].href;
+                for (let pg = 2; pg <= totalPages; pg++) {
+                    if (seen.has(String(pg))) continue;
+                    let href = tmpl.replace(/([?&]page=)\d+/, '$1' + pg);
+                    if (!href.includes('page=' + pg)) {
+                        href += (href.includes('?') ? '&' : '?') + 'page=' + pg;
+                    }
+                    addTab(pg, href);
                 }
-                // 列表页只要同 fid 的翻页
-                const fid = urlParams.get('fid');
-                return fid && u.searchParams.get('fid') === fid && u.searchParams.get('action') === 'forum';
-            } catch(e) { return false; }
-        });
+            }
 
-        // 先加当前页（激活态）
+            // 按页码排序
+            tabs.sort((a, b) => parseInt(a.text) - parseInt(b.text));
+
+        } else if (!isHomePage) {
+            // ── 列表页翻页 ──
+            const fid = urlParams.get('fid');
+            document.querySelectorAll('a[href*="page="]').forEach(a => {
+                try {
+                    const u = new URL(a.href);
+                    if (u.searchParams.get('action') !== 'forum') return;
+                    if (fid && u.searchParams.get('fid') !== fid) return;
+                    addTab(u.searchParams.get('page'), a.href);
+                } catch(e) {
+                    const m = (a.getAttribute('href') || '').match(/[?&]page=(\d+)/);
+                    if (m) addTab(m[1], a.href);
+                }
+            });
+            tabs.sort((a, b) => parseInt(a.text) - parseInt(b.text));
+        }
+
+        // 渲染 Sheet 标签
+        // DEBUG: log to console so user can check
+        console.log('[TGFC摸鱼] initSheetPagination:', {
+            currentPage,
+            tabsCount: tabs.length,
+            tabs: tabs.map(t => t.text),
+            pagingElements: document.querySelectorAll('.paging a').length,
+            pagingData_tabs: pagingData ? pagingData.tabs.length : 'N/A'
+        });
         const curTab = document.createElement('div');
         curTab.className = 'sheet-tab active';
-        curTab.textContent = `第${currentPage}页`;
+        curTab.textContent = tabs.length > 0 ? '第' + currentPage + '页' : 'Sheet1';
         sc.appendChild(curTab);
-        seen.add(currentPage);
 
-        pageLinks.forEach(a => {
-            const pg = new URL(a.href).searchParams.get('page');
-            if (!pg || seen.has(pg)) return;
-            seen.add(pg);
+        tabs.forEach(({ text, href }) => {
             const tab = document.createElement('a');
             tab.className = 'sheet-tab';
-            tab.textContent = `第${pg}页`;
-            tab.href = a.href; tab.target = '_self';
+            tab.textContent = text;
+            tab.href = href;
+            tab.target = '_self';
             sc.appendChild(tab);
         });
-
-        // 如果没找到任何翻页，显示默认 Sheet1
-        if (sc.children.length === 1 && pageLinks.length === 0) {
-            sc.children[0].textContent = 'Sheet1';
-        }
     }
-
     // ==========================================
     // 7. 公式栏悬停
     // ==========================================
