@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TGFC摸鱼助手(Excel伪装)
 // @namespace    http://tampermonkey.net/
-// @version      5.0
+// @version      6.0
 // @description  把 TGFC WAP论坛伪装成 Excel 表格。支持帖子列表页和帖子详情页。
 // @author       Based on S1摸鱼助手 by Gemini, adapted for TGFC
 // @match        *://s.tgfcer.com/wap/*
@@ -271,8 +271,9 @@
             width:35px; background:#f3f2f1; text-align:center;
             color:#666; font-size:10pt; border-right:1px solid #d4d4d4;
         }
-        body.excel-mode .excel-cell.col-author { width:200px; color:#555; font-size:10pt; }
-        body.excel-mode .excel-cell.col-paging { width:110px; color:#888; font-size:10pt; }
+        body.excel-mode .excel-cell.col-author { width:200px; color:#555; font-size:10pt; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        body.excel-mode .excel-cell.col-paging { width:90px; color:#888; font-size:10pt; white-space:nowrap; overflow:hidden; }
+        body.excel-mode .excel-cell.col-title { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
         body.excel-mode .excel-cell a { color:#000 !important; text-decoration:none !important; }
         body.excel-mode .excel-cell a.s2 { color:#1a6fc4 !important; margin-right:3px; }
         body.excel-mode .excel-row.sticky .excel-cell {
@@ -358,8 +359,13 @@
         #formula-bar-content a { color:#333; text-decoration:none; margin:0 2px; }
         #formula-bar-content a:hover { text-decoration:underline; color:#217346; }
         #formula-bar-content em { color:#999; font-style:normal; margin:0 2px; }
-        .excel-col-headers { display:flex; background:#f3f2f1; border-bottom:1px solid #d4d4d4; font-size:11px; color:#666; text-align:center; height:20px; line-height:20px; }
-        .excel-col-headers div { border-right:1px solid #d4d4d4; }
+        .excel-col-headers { background:#f3f2f1; border-bottom:1px solid #d4d4d4; font-size:11px; color:#666; height:20px; line-height:20px; }
+        /* 列表页：列头用 display:table 和内容完全一致，保证对齐 */
+                /* 列表页列头已改为表格内第一行，flex列头隐藏 */
+        body.excel-mode.forum-page .excel-col-headers { display:none !important; }
+        /* 详情页：列头用 flex（保持原有行为）*/
+        body.excel-mode.thread-page .excel-col-headers { display:flex; }
+        body.excel-mode.thread-page .excel-col-headers > div { border-right:1px solid #d4d4d4; padding:0 4px; }
         .row-idx-blank { width:35px; background:#e6e6e6; flex-shrink:0; }
         .excel-col-headers .col-a { width:155px; flex-shrink:0; padding:0 4px; }
         .excel-col-headers .col-b { flex:1; text-align:left; padding:0 4px; }
@@ -611,6 +617,18 @@
 
         const tableWrap = document.createElement('div');
         tableWrap.id = 'tgfc-excel-table-wrap';
+
+        // 列头行：作为表格第一行，与数据行共用同一个 display:table
+        // 这样列宽由内容自动决定，天然对齐，无需手动指定宽度
+        const headerRow = document.createElement('div');
+        headerRow.className = 'excel-row forum-col-header';
+        headerRow.innerHTML = `
+            <div class="excel-cell row-idx" style="background:#f3f2f1;color:#666;font-weight:normal;border-bottom:2px solid #d4d4d4;">#</div>
+            <div class="excel-cell col-author" style="background:#f3f2f1;color:#666;text-align:center;border-bottom:2px solid #d4d4d4;">A（作者/回复/浏览/末回）</div>
+            <div class="excel-cell col-title" style="background:#f3f2f1;color:#666;border-bottom:2px solid #d4d4d4;">B（主题）</div>
+            <div class="excel-cell col-paging" style="background:#f3f2f1;color:#666;text-align:center;border-bottom:2px solid #d4d4d4;">C（分页）</div>
+        `;
+        tableWrap.appendChild(headerRow);
 
         let rowIdx = 1;
         allTitles.forEach(div => {
@@ -911,6 +929,16 @@
             stripPostedBy(clone);
             // 去除内嵌广告
             clone.querySelectorAll('ins, p:has(ins)').forEach(el => el.remove());
+            // 修复懒加载图片：lazyload.js 用 data-src 存真实 src
+            // clone 后 lazyload 不会触发，需手动把 data-src 赋值给 src
+            clone.querySelectorAll('img[data-src]').forEach(img => {
+                img.src = img.getAttribute('data-src');
+                img.removeAttribute('data-src');
+            });
+            clone.querySelectorAll('img[data-original]').forEach(img => {
+                img.src = img.getAttribute('data-original');
+                img.removeAttribute('data-original');
+            });
             tdC.innerHTML = clone.innerHTML;
         } else {
             tdC.textContent = '（内容为空）';
